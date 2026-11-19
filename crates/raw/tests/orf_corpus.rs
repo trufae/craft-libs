@@ -1,8 +1,8 @@
 //! Exact Olympus / OM System sensor-pixel regressions on CC0 raw.pixls.us files.
 //! The reference is LibRaw 0.22.2's unprocessed_raw executable, run as a black box;
-//! no source or camera matrices were read. SHA256 covers the entire row-major u16
-//! mosaic in little-endian order, including borders. Input files stay in corpus/raw
-//! (gitignored); download them with `cargo xtask corpus --download`. See docs/orf.md.
+//! SHA256 covers the entire row-major u16 mosaic in little-endian order, including
+//! borders. Input files stay outside this repository; see docs/orf.md for acquisition
+//! and the distinction between reference agreement and historical provenance.
 
 #![cfg(feature = "orf")]
 

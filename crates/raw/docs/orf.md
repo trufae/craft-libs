@@ -21,11 +21,12 @@ The bit layout, prediction and reference methodology are recorded in
 [LightCraft's implementation record](https://github.com/storytold/lightcraft/blob/225282d856868c4cb9063c72dd331c5bbcdadd1e/docs/orf.md).
 
 The existing uncompressed reader, `WB_GLevel` handling, level provenance and
-strip-table checks are preserved. The compressed header takes priority over
-packing heuristics. If a complete 16-bit word strip shares the prefix, every
-compressed code is validated even during a header probe; invalid compressed
-codes then retain the word interpretation. Unsupported modes can still yield a
-scanned JPEG when the preview pointers are unreadable. `.ORI` directory discovery,
+strip-table checks are preserved. Every matching single-strip stream is fully
+validated even during a header probe. Invalid Rice codes retain a valid word or
+packed interpretation. If both interpretations fit, decoding returns an explicit
+unsupported-layout error: neither Compression=1 nor the prefix distinguishes them.
+Unsupported modes can still yield a scanned JPEG when preview pointers are unreadable.
+`.ORI` directory discovery,
 colour calibration, lens corrections and library/proxy upgrades belong to apps.
 
 ## Verification

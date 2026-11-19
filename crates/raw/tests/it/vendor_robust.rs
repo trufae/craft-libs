@@ -241,8 +241,7 @@ fn raf() -> Vec<u8> {
 }
 
 /// An Olympus ORF (TIFF with an `IIRO` magic) or Panasonic RW2 (`IIU\0`), raw image in IFD0.
-fn magic_tiff(magic: &[u8; 4], make: &str) -> Vec<u8> {
-    let px = (W * H) as usize;
+fn magic_tiff(magic: &[u8; 4], make: &str, strip: Vec<u8>) -> Vec<u8> {
     let mut ifd = IfdBuilder::new();
     ifd.set(t::IMAGE_WIDTH, Value::Long(vec![W]));
     ifd.set(t::IMAGE_LENGTH, Value::Long(vec![H]));
@@ -250,7 +249,7 @@ fn magic_tiff(magic: &[u8; 4], make: &str) -> Vec<u8> {
     ifd.set(t::COMPRESSION, Value::Short(vec![1]));
     ifd.set(t::PHOTOMETRIC, Value::Short(vec![1]));
     ifd.set(t::MAKE, Value::Ascii(make.into()));
-    ifd.set_image(ImageData::Strips { rows_per_strip: H, strips: vec![(0..px * 2).map(|i| (i * 13) as u8).collect()] });
+    ifd.set_image(ImageData::Strips { rows_per_strip: H, strips: vec![strip] });
     let mut b = TiffWriter::new(ByteOrder::Little, false).write(&[ifd]).unwrap();
     b[..4].copy_from_slice(magic);
     b
@@ -269,18 +268,7 @@ fn compressed_orf() -> Vec<u8> {
     }
     let mut strip = vec![0, 0, 0, 0, 1, 0, 0];
     strip.extend(bits.chunks(8).map(|chunk| chunk.iter().enumerate().fold(0u8, |v, (i, b)| v | (u8::from(*b) << (7 - i)))));
-    let mut ifd = IfdBuilder::new();
-    ifd.set(t::IMAGE_WIDTH, Value::Long(vec![W]));
-    ifd.set(t::IMAGE_LENGTH, Value::Long(vec![H]));
-    ifd.set(t::BITS_PER_SAMPLE, Value::Short(vec![16]));
-    ifd.set(t::COMPRESSION, Value::Short(vec![1]));
-    ifd.set(t::PHOTOMETRIC, Value::Short(vec![1]));
-    ifd.set(t::MAKE, Value::Ascii("OLYMPUS".into()));
-    ifd.set_image(ImageData::Strips { rows_per_strip: H, strips: vec![strip] });
-    let mut bytes = TiffWriter::new(ByteOrder::Little, false).write(&[ifd]).unwrap();
-    bytes[..4].copy_from_slice(b"IIRO");
-    assert_eq!(craft_raw::decode(&bytes).unwrap().data.len(), (W * H) as usize);
-    bytes
+    magic_tiff(b"IIRO", "OLYMPUS", strip)
 }
 
 /// Collect synthetic raw containers for the shared truncation and corruption checks.
@@ -289,7 +277,7 @@ fn samples() -> Vec<Vec<u8>> {
         cfa_tiff("SONY", 32767, 12, ByteOrder::Little),
         cfa_tiff("SONY", 1, 14, ByteOrder::Little),
         cfa_tiff("SONY", 32766, 14, ByteOrder::Little),
-        magic_tiff(b"IIRO", "OLYMPUS IMAGING CORP."),
+        magic_tiff(b"IIRO", "OLYMPUS IMAGING CORP.", (0..(W * H * 2) as usize).map(|i| (i * 13) as u8).collect()),
         compressed_orf(),
         raf(),
         rw2(),

@@ -29,8 +29,7 @@
 //!   and 3624 (E-330), as was the sensor-origin RGGB anchoring (the maker-note crop offsets are odd). The E-M5 Mark II
 //!   and PEN-F files were only checked for smoothness, not for CFA anchoring or black level.
 //! - Lossless compressed ORF (E-410 onwards, PEN, OM-D, Tough and OM System): `orfc` decodes the adaptive
-//!   Rice-coded 12-bit sensor stream, independently derived from CC0 samples and Olympus patent prose.
-//!   See `docs/orf.md` for the bit layout and exact sensor-pixel verification.
+//!   Rice-coded 12-bit sensor stream. See `docs/orf.md` for reported derivation and exact sensor verification.
 //! - The colour-filter layout is the file's Exif `CFAPattern`: GRBG on the E-1 and E-400, RGGB on the XZ-2, where
 //!   the colours of the decoded mosaic follow the embedded JPEG best with exactly that layout
 //!   (`corpus_orf_cfa_patterns`). The samples' active areas start at even offsets, so they can't tell whether the
@@ -209,16 +208,14 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode, limits: &Limits) -> Result<RawIma
     let info = ifd0.image()?;
     let (w, h) = (info.width as usize, info.height as usize);
     let n = w.checked_mul(h).filter(|n| *n > 0 && *n <= limits.samples()).ok_or(RawError::Limit("image too large"))?;
+    if info.compression != 1 {
+        return Err(RawError::Unsupported(format!("ORF compression {}", info.compression)));
+    }
     // A partial TIFF directory is damage, not evidence of an unsupported compressed layout.
     // Do not infer packing from an absent strip table or from clipped sensor bytes.
-    if info.compression == 1
-        && (info.offsets.is_empty()
-            || info.offsets.len() != info.byte_counts.len()
-            || info
-                .offsets
-                .iter()
-                .zip(&info.byte_counts)
-                .any(|(&at, &len)| len == 0 || at.checked_add(len).is_none_or(|end| end > bytes.len() as u64)))
+    if info.offsets.is_empty()
+        || info.offsets.len() != info.byte_counts.len()
+        || info.offsets.iter().zip(&info.byte_counts).any(|(&at, &len)| len == 0 || at.checked_add(len).is_none_or(|end| end > bytes.len() as u64))
     {
         return Err(RawError::Corrupt("ORF strip table is missing or outside file".into()));
     }
@@ -226,48 +223,37 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode, limits: &Limits) -> Result<RawIma
     let total = chunks.iter().try_fold(0u64, |sum, c| sum.checked_add(c.len)).ok_or(RawError::Limit("ORF strip sizes overflow"))?;
     let stated = cfa_from_exif(&tiff);
     let mut two_field = false;
-    let mut compressed = false;
+    let word16 = total >= (n as u64) * 2;
+    let block16 = is_block16(w, n, total, chunks.len());
+    let packed12 = info.bits() == 12 && total.saturating_mul(8) >= (n as u64) * 12 && total.saturating_mul(8) < (n as u64) * 13 && chunks.len() == 1;
+    let uncompressed = word16 || block16 || packed12;
     let compressed_strip = match chunks.as_slice() {
-        [chunk] => chunk_bytes(bytes, chunk).filter(|src| orfc::recognizes(src)),
+        [chunk] if info.offsets.len() == 1 => chunk_bytes(bytes, chunk).filter(|src| orfc::recognizes(src)),
         _ => None,
     };
-    // When both layouts fit, a prefix alone is not evidence of compression. Validate every
-    // compressed code even for a header probe; a valid padded stream keeps priority, while
-    // ordinary words with an accidental prefix retain their existing interpretation.
-    let (compressed_strip, decoded) = match compressed_strip {
-        Some(src) if src.len() as u64 >= (n as u64) * 2 => match orfc::decode(src, w, h) {
-            Ok(data) => (Some(src), Some(data)),
-            Err(RawError::Corrupt(_)) => (None, None),
+    // Compression=1 and the prefix are shared with ordinary pixels. Validate all codes even
+    // for probes; a valid second interpretation is ambiguous, never evidence for either codec.
+    let decoded = match compressed_strip {
+        Some(src) => match orfc::decode(src, w, h) {
+            Ok(_) if uncompressed => return Err(RawError::Unsupported("ambiguous Olympus ORF sensor layout".into())),
+            Ok(data) => Some(data),
+            Err(RawError::Corrupt(_)) if uncompressed => None,
             Err(e) => return Err(e),
         },
-        src => (src, None),
+        None => None,
     };
-    let (mut data, bits, from_word16) = if info.compression != 1 {
-        return Err(RawError::Unsupported(format!("ORF compression {}", info.compression)));
-    } else if let Some(src) = compressed_strip {
-        if src.len() as u64 != total || info.samples_per_pixel != 1 || info.planar == 2 {
+    let compressed = decoded.is_some();
+    let (mut data, bits, from_word16) = if let Some(data) = decoded {
+        if info.samples_per_pixel != 1 || info.planar == 2 {
             return Err(RawError::Corrupt("ORF compressed strip has an invalid layout".into()));
         }
-        orfc::validate(src, w, h)?;
-        compressed = true;
-        let d = if mode == Mode::Full || stated.is_none() {
-            match decoded {
-                Some(data) => data,
-                None => orfc::decode(src, w, h)?,
-            }
-        } else {
-            Vec::new()
-        };
-        (RawData::U16(d), 12, false)
-    } else if total >= (n as u64) * 2 {
+        (RawData::U16(data), 12, false)
+    } else if word16 {
         let d = read_image(bytes, &info, tiff.order, Packing::Word16, limits)?;
         (d, 16, true)
-    } else if is_block16(w, n, total, chunks.len()) {
+    } else if block16 {
         let src = chunk_bytes(bytes, &chunks[0]).ok_or_else(|| RawError::Corrupt("ORF strip outside file".into()))?;
         let stride = w / 10 * 16;
-        if src.len() as u64 != total || src.len() / stride != h {
-            return Err(RawError::Corrupt("ORF strip shorter than its rows".into()));
-        }
         let d = if mode == Mode::Full || stated.is_none() {
             let mut d = vec![0u16; n];
             d.par_chunks_mut(w).enumerate().try_for_each(|(y, row)| unpack_row_blocks16(&src[y * stride..(y + 1) * stride], row))?;
@@ -276,15 +262,10 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode, limits: &Limits) -> Result<RawIma
             Vec::new()
         };
         (RawData::U16(d), 12, false)
-    } else if info.bits() == 12 && total * 8 >= (n as u64) * 12 && total * 8 < (n as u64) * 13 && chunks.len() == 1 {
+    } else if packed12 {
         let src = chunk_bytes(bytes, &chunks[0]).ok_or_else(|| RawError::Corrupt("ORF strip outside file".into()))?;
         // Only the declared 12-bit layout is supported here. A compressed stream in a 16-bit
         // ORF container must not fall through to packed decoding just because its length fits.
-        // the strip as it is in the file (clipped at its end), not as its tag states it: one too short
-        // for the samples is a truncated file, refused before they are allocated
-        if (src.len() as u64).saturating_mul(8) < (n as u64).saturating_mul(12) {
-            return Err(RawError::Corrupt("ORF strip shorter than its samples".into()));
-        }
         // the depth is fixed here, so a header-only probe needs the samples only when the file doesn't state its
         // colour-filter layout
         let d = if mode == Mode::Full || stated.is_none() {
@@ -370,6 +351,9 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode, limits: &Limits) -> Result<RawIma
             Some([(g(MN_WB_RED)? / 256.0) as f32, 1.0, (g(MN_WB_BLUE)? / 256.0) as f32])
         });
     let (white, white_source) = if compressed { (4095.0, crate::LevelSource::Fallback) } else { white_from_data_sourced(samples, bits) };
+    if compressed && mode == Mode::Header {
+        samples.clear();
+    }
     let img = RawImage {
         format: RawFormat::Orf,
         width: w,
@@ -663,7 +647,7 @@ mod tests {
         strip
     }
 
-    /// Header and full reads agree, and padding cannot select an uncompressed codec.
+    /// Header and full reads agree on the lossless sensor data and truncated streams.
     #[test]
     fn compressed_orf_import_and_full_decode_use_sensor_data() {
         for tag in [Some(RGGB), None] {
@@ -674,17 +658,43 @@ mod tests {
             assert_eq!(raw.white, [4095.0]);
             assert_eq!(raw.cfa.as_ref().unwrap().name(), "RGGB");
             assert_eq!(raw.info(), crate::probe_info(&bytes).unwrap());
+            assert_eq!(decode(&bytes, Mode::Header, &Limits::default()).unwrap().data.len(), 0);
         }
         let bytes = orf_with(64, 4, 16, zero_compressed(64, 4)[..100].to_vec(), Some(RGGB));
         assert!(crate::decode(&bytes).is_err());
         assert!(crate::probe_info(&bytes).is_err());
-        // The codec is selected by its header even when its byte count resembles packed/word data.
-        let mut padded = zero_compressed(64, 4);
-        padded.resize(64 * 4 * 2, 0);
-        let bytes = orf_with(64, 4, 16, padded, Some(RGGB));
-        let raw = crate::decode(&bytes).unwrap();
-        assert_eq!(raw.data, RawData::U16(vec![0; 64 * 4]));
-        assert_eq!(raw.info(), crate::probe_info(&bytes).unwrap());
+    }
+
+    /// Neither a prefix nor valid Rice codes distinguish truly overlapping sensor layouts.
+    #[test]
+    fn ambiguous_compressed_orf_is_not_silently_reinterpreted() {
+        for (bits, len) in [(16, 160), (16, 128), (12, 120)] {
+            let mut strip = zero_compressed(20, 4);
+            strip.resize(len, 0);
+            assert_eq!(orfc::decode(&strip, 20, 4).unwrap(), vec![0; 80]);
+            let bytes = orf_with(20, 4, bits, strip, Some(RGGB));
+            for result in [crate::decode(&bytes).map(|_| ()), crate::probe_info(&bytes).map(|_| ())] {
+                assert!(matches!(result, Err(RawError::Unsupported(why)) if why.contains("ambiguous")));
+            }
+        }
+    }
+
+    /// Valid block16 and packed12 pixels can have the Rice header but invalid Rice codes.
+    #[test]
+    fn packed_prefix_collision_preserves_uncompressed_decoding() {
+        for (bits, len, index) in [(16, 128, 2), (12, 120, 5)] {
+            let mut strip = vec![0; len];
+            strip[..7].copy_from_slice(&[0, 0, 0, 0, 1, 0, 0]);
+            assert!(orfc::decode(&strip, 20, 4).is_err());
+            let mut expected = vec![0; 80];
+            expected[index] = 256;
+            for tag in [Some(RGGB), None] {
+                let bytes = orf_with(20, 4, bits, strip.clone(), tag);
+                let raw = crate::decode(&bytes).unwrap();
+                assert_eq!(raw.data, RawData::U16(expected.clone()));
+                assert_eq!(raw.info(), crate::probe_info(&bytes).unwrap());
+            }
+        }
     }
 
     /// Both entry points honor the caller's sample budget before reading compressed pixels.
@@ -707,9 +717,7 @@ mod tests {
             let strip: Vec<_> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
             assert!(orfc::recognizes(&strip));
             assert!(orfc::decode(&strip, n, 1).is_err());
-            if n > 4 {
-                assert!(orfc::validate(&strip, n, 1).is_ok());
-            } else {
+            if n == 4 {
                 // The existing Word16 normalization shifts this nearly-black strip down.
                 words.iter_mut().for_each(|v| *v >>= 4);
             }
@@ -943,10 +951,20 @@ mod tests {
     fn two_field_12_bit_layout() {
         let bytes = two_field(true);
         let r = crate::decode(&bytes).unwrap();
-        let want: Vec<u16> = (0..5).flat_map(|y| (0..8).map(move |x| field_px(x, y))).collect();
-        assert_eq!((r.data.clone(), r.bits, r.width, r.height), (RawData::U16(want), 12, 8, 5));
+        let mut want: Vec<u16> = (0..5).flat_map(|y| (0..8).map(move |x| field_px(x, y))).collect();
+        assert_eq!((r.data.clone(), r.bits, r.width, r.height), (RawData::U16(want.clone()), 12, 8, 5));
         assert_eq!(r.cfa.as_ref().unwrap().name(), "BGGR");
         assert_eq!(crate::probe_info(&bytes).unwrap(), r.info());
+        // The grid can expose only one chunk while the full strip table still describes fields.
+        let ifd = &Tiff::parse(&bytes).unwrap().ifds[0];
+        let (rows_at, pixels_at) = (ifd.get(t::ROWS_PER_STRIP).unwrap().offset as usize, ifd.image().unwrap().offsets[0] as usize);
+        let mut collision = bytes;
+        collision[rows_at..rows_at + 4].copy_from_slice(&5u32.to_le_bytes());
+        collision[pixels_at..pixels_at + 7].copy_from_slice(&[0, 0, 0, 0, 1, 0, 0]);
+        want[..5].copy_from_slice(&[0, 0, 0, 256, 9]);
+        let r = crate::decode(&collision).unwrap();
+        assert_eq!(r.data, RawData::U16(want));
+        assert_eq!(crate::probe_info(&collision).unwrap(), r.info());
         // the table without the gap: sizes no longer add up
         let e = crate::decode(&two_field(false)).map(|_| ());
         assert!(matches!(e, Err(RawError::Unsupported(_))), "{e:?}");

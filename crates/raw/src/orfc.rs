@@ -1,9 +1,7 @@
-//! Olympus's lossless ORF stream, independently derived from CC0 raw.pixls.us files.
+//! Olympus's measured lossless ORF stream, ported from LightCraft #3964.
 //!
-//! The predictor, signed Rice codes, flatness runs and residual correction are described in Olympus
-//! patents US7333035B2 and US7715639B2 (Takashi Ishikawa). The actual ORF constants and packing were
-//! established against sensor pixels from the `unprocessed_raw` executable (LibRaw 0.22.2), used only
-//! as a black-box oracle: no decoder source or camera matrices were consulted. See docs/orf.md.
+//! See docs/orf.md for the reported patent/sample methodology, exact sensor verification and
+//! unresolved historical provenance. Sensor agreement does not establish independent derivation.
 //!
 //! After a seven-byte header, samples are coded MSB-first without byte stuffing or row alignment.
 //! Even/odd columns have separate magnitude, correction and flatness state, reset on every row.
@@ -75,29 +73,20 @@ fn payload_bits(byte_len: usize) -> Result<usize> {
     Ok(byte_len * 8)
 }
 
-/// Validate the stream envelope without allocating the sensor buffer (also used by import probes).
-pub(super) fn validate(src: &[u8], w: usize, h: usize) -> Result<&[u8]> {
-    let n = w.checked_mul(h).filter(|n| w > 0 && h > 0 && *n <= MAX_SAMPLES).ok_or(RawError::Limit("ORF image too large"))?;
-    if !recognizes(src) {
-        return Err(RawError::Unsupported("Olympus ORF stream header".into()));
-    }
-    let payload = src.get(HEADER.len()..).ok_or_else(|| RawError::Corrupt("ORF stream header truncated".into()))?;
-    // Every pixel needs at least sign + two low bits + unary terminator + two remainder bits.
-    // Check this before allocation, so a tiny file cannot request an enormous sensor buffer.
-    if n > payload_bits(payload.len())? / 6 {
-        return Err(RawError::Corrupt("ORF compressed strip too short for its dimensions".into()));
-    }
-    Ok(payload)
-}
-
 /// Decode a full sensor, rejecting truncated symbols and samples outside the 12-bit range.
 pub(super) fn decode(src: &[u8], w: usize, h: usize) -> Result<Vec<u16>> {
-    let payload = validate(src, w, h)?;
-    let mut bits = Bits::new(payload);
+    let n = w.checked_mul(h).filter(|n| w > 0 && h > 0 && *n <= MAX_SAMPLES).ok_or(RawError::Limit("ORF image too large"))?;
+    let payload = src.strip_prefix(HEADER).ok_or_else(|| RawError::Unsupported("Olympus ORF stream header".into()))?;
     let limit = payload_bits(payload.len())?;
+    // Every pixel needs at least sign + two low bits + unary terminator + two remainder bits.
+    // Check this before allocation, so a tiny file cannot request an enormous sensor buffer.
+    if n > limit / 6 {
+        return Err(RawError::Corrupt("ORF compressed strip too short for its dimensions".into()));
+    }
+    let mut bits = Bits::new(payload);
     let mut samples = Vec::new();
-    samples.try_reserve_exact(w * h).map_err(|_| RawError::Limit("cannot allocate ORF sensor buffer"))?;
-    samples.resize(w * h, 0u16);
+    samples.try_reserve_exact(n).map_err(|_| RawError::Limit("cannot allocate ORF sensor buffer"))?;
+    samples.resize(n, 0u16);
     for y in 0..h {
         let mut contexts = [Context::default(); 2];
         let (past, rest) = samples.split_at_mut_checked(y * w).ok_or_else(|| RawError::Corrupt("ORF row outside sensor".into()))?;

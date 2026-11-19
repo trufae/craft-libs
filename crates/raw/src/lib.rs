@@ -4,7 +4,7 @@
 //! colour matrices, as-shot white balance, DNG opcode lists and profile tables), and back for DNG.
 //!
 //! - [`probe`] recognises raw containers; [`decode`] / [`decode_with`] turn a file into a [`RawImage`];
-//!   [`probe_info`] reads the same description from the headers alone; [`embedded_preview`] returns the largest
+//!   [`probe_info`] reads the same description without returning samples; [`embedded_preview`] returns the largest
 //!   embedded JPEG (or DNG 1.7 JPEG XL) preview; [`semantic_masks`] reads a DNG's semantic masks.
 //! - [`write_dng`] writes a [`RawImage`] as a DNG (uncompressed, lossless JPEG or Deflate).
 //!
@@ -647,9 +647,10 @@ pub fn decode_reduced(bytes: &[u8], min_long: usize, limits: &Limits) -> Result<
 }
 
 /// Everything [`decode`] learns about a raw file except its samples: geometry, orientation, CFA, colour data,
-/// as-shot white balance, opcode lists (embedded lens corrections) and the camera, read from the headers without
-/// decompressing the pixel data, for imports. Equal to [`RawImage::info`] of the decoded image. Black and white
-/// levels are not included (some formats measure them from the samples).
+/// as-shot white balance, opcode lists (embedded lens corrections) and the camera, normally read from headers
+/// for imports. Lossless ORF streams are fully validated to disambiguate overlapping sensor layouts.
+/// Equal to [`RawImage::info`] of the decoded image. Black and white levels are not included (some formats
+/// measure them from the samples).
 pub fn probe_info(bytes: &[u8]) -> Result<RawInfo> {
     probe_info_with(bytes, &Limits::default())
 }
