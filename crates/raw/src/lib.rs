@@ -35,7 +35,7 @@
 //! | `nef` | Nikon NEF and NRW: uncompressed, packed, Nikon's Huffman coding (lossless and lossy, 12 and 14 bits), small raw |
 //! | `rw2` | Panasonic RW2, Leica RWL and the older Panasonic / Leica RAW: packed, formats 4 and 6, format 8 prefix-coded strips, 16-bit words |
 //! | `raf` | Fujifilm RAF: uncompressed Bayer and X-Trans, Fujifilm's lossless and lossy compression, lens corrections |
-//! | `orf` | Olympus / OM System ORF: uncompressed 16-bit, 12-bit packed and two-field layouts, 16-byte blocks; compressed refused |
+//! | `orf` | Olympus / OM System ORF: uncompressed 16-bit, 12-bit packed and two-field layouts, 16-byte blocks and measured lossless compressed streams |
 //! | `arw` | Sony ARW (and SR2 / SRF containers): uncompressed, ARW2, lossless JPEG tiles, ARW6, the encrypted SR2SubIFD, lens corrections |
 //! | `cr3` | Canon CR3: CRX lossless Bayer and C-RAW (lossy), through craft-metadata's CR3 container |
 //! | `pef` | Pentax PEF: uncompressed (packed or 16-bit words) and Pentax's Huffman coding (compression 65535) |
@@ -128,6 +128,8 @@ pub mod opcode_raw;
 pub mod opcodes;
 #[cfg(feature = "orf")]
 mod orf;
+#[cfg(feature = "orf")]
+mod orfc;
 #[cfg(feature = "pef")]
 mod pef;
 mod preview;
